@@ -1,60 +1,76 @@
-# RAG App — GitHub Actions 部署到 AWS App Runner
+# RAG 应用 — GitHub Actions + Railway 自动化部署
 
-本项目使用 GitHub Actions 在推送到 `main` 分支时自动构建 Docker 镜像并部署到 AWS App Runner。
-## 用 Terraform 创建所需 AWS环境
-```
-# 创建ECR, Secret Manager
-TF_VAR_manage_apprunner_via_terraform=true TF_VAR_github_org_or_user=<github_user_name> TF_VAR_github_repo_name=<github_repo_name> TF_VAR_openai_api_key="<YOUR_OPENAI_KEY>" terraform apply -auto-approve
+本项目是一个基于 FastAPI 的检索增强生成（RAG）应用，包含前端 Web UI（Firebase 登录），并通过 GitHub Actions + Railway 实现 CI/CD：构建 Docker、运行测试、自动部署。
 
-# 本地构建Docker镜像推送到ECR (ECR来自于上面命令的输出)
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 531397997975.dkr.ecr.us-east-1.amazonaws.com && docker build --platform linux/amd64 -t 531397997975.dkr.ecr.us-east-1.amazonaws.com/bee-edu-rag-app:latest . && docker push 531397997975.dkr.ecr.us-east-1.amazonaws.com/bee-edu-rag-app:latest 
+**技术栈**
+- 后端：`FastAPI`、`LangChain`、`FAISS`、`OpenAI`
+- 前端：`HTML`、`CSS`、`JavaScript`、`Firebase Web SDK`
+- DevOps：`Docker`、`GitHub Actions`、`Railway`
 
-# 创建App Runner Service
-TF_VAR_manage_apprunner_via_terraform=true TF_VAR_github_org_or_user=<github_user_name> TF_VAR_github_repo_name=<github_repo_name> TF_VAR_openai_api_key="<YOUR_OPENAI_KEY>" terraform apply -auto-approve
-```
+**项目概览**
+- 提供 `/ui` 前端界面，支持邮箱密码登录；登录后可在聊天窗口调用后端。
+- 提供 `/chat` 聊天接口，使用 LangChain + OpenAI 模型并结合本地 `FAISS` 检索。
+- 挂载静态资源 `/static/*`，提供页面与脚本；通过 `/firebase-config` 下发前端所需配置。
+- 提供最小化测试覆盖：健康检查、聊天接口、UI 与配置路由。
 
+**目录结构**
+- `app.py`：FastAPI 应用与路由（`/`、`/ui`、`/firebase-config`、`/chat`）。
+- `static/`：前端页面与静态资源（`index.html`、`app.js`、`styles.css`）。
+- `faiss_index/`：向量检索索引（通过 `ingest.py` 生成）。
+- `ingest.py`：从 `data.txt` 生成 `FAISS` 索引。
+- `tests/test_app.py`：端到端接口测试。
+- `.github/workflows/main.yml`：CI/CD 工作流。
+- `Dockerfile`、`requirements.txt`：容器与依赖定义。
 
-## 工作流概览（`.github/workflows/main.yml`）
-- 触发条件：`push` 到 `main`。
-- 核心步骤：
-  - `Checkout` 代码。
-  - 通过 GitHub OIDC 假设 IAM 角色（`aws-actions/configure-aws-credentials@v4`）。
-  - 登录 Amazon ECR（`aws-actions/amazon-ecr-login@v2`）。
-  - 构建并推送镜像到 ECR（镜像标签为提交 SHA 的前 7 位）。
-  - 校验 `APP_RUNNER_ARN` 格式（避免把 URL/名称误当 ARN）。
-  - 从现有服务查询 `access-role-arn` 与 `instance-role-arn`。
-  - 使用 `awslabs/amazon-app-runner-deploy` 将 ECR 镜像部署到既有服务，并等待到稳定状态。
+**环境变量**
+- 后端（运行与索引构建）
+  - `OPENAI_API_KEY`
+- 前端配置（由后端通过 `/firebase-config` 返回）
+  - `FIREBASE_API_KEY`
+  - `FIREBASE_AUTH_DOMAIN`
+  - `FIREBASE_PROJECT_ID`
+  - `FIREBASE_APP_ID`
+  - `FIREBASE_MESSAGING_SENDER_ID`
 
-### 部署步骤关键配置（简化片段）
-```yaml
-- name: Deploy to App Runner
-  uses: awslabs/amazon-app-runner-deploy@main
-  with:
-    service: bee-edu-rag-service
-    image: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.TAG }}
-    region: ${{ env.AWS_REGION }}
-    access-role-arn: ${{ env.APP_RUNNER_ACCESS_ROLE_ARN }}
-    instance-role-arn: ${{ env.APP_RUNNER_INSTANCE_ROLE_ARN }}
-    port: 8080
-    cpu: 1
-    memory: 2
-    wait-for-service-stability-seconds: 600
-```
+**本地开发**
+- 安装与运行
+  - `python3 -m venv .venv && source .venv/bin/activate`
+  - `pip install -r requirements.txt`
+  - 可选：设置 `OPENAI_API_KEY` 并运行 `python ingest.py` 以更新向量索引。
+  - 启动服务：`uvicorn app:app --reload --host 0.0.0.0 --port 8080`
+  - 访问界面：`http://localhost:8080/ui`
+- 测试
+  - `pip install pytest httpx && pytest -q`
 
-## 必需的仓库 Secrets / 变量
-- `AWS_REGION`：部署区域，例如 `us-east-1`。
-- `ECR_REPOSITORY`：ECR 仓库名，例如 `bee-edu-rag-app`。
-- `APP_RUNNER_ARN`：App Runner 服务 ARN（Terraform 输出的值）。
-- `AWS_IAM_ROLE_TO_ASSUME`：GitHub OIDC 假设的 IAM 角色 ARN（例如 `github-actions-deploy-role`）。
+**API**
+- `GET /`（`app.py:67-69`）：健康检查，返回 `{"message": ..., "version": ...}`。
+- `GET /ui`（`app.py:71-73`）：返回前端页面 `static/index.html`。
+- `GET /firebase-config`（`app.py:75-83`）：返回前端初始化所需的 Firebase 配置。
+- `POST /chat`（`app.py:85-94`）：请求体 `{"question": "..."}`，返回 `{"answer": "..."}` 或 `{"error": "..."}`。
+- 静态资源：`/static/*`（`app.py:96`）。
 
-> 说明：日志中对 Secrets 的显示会被 GitHub 脱敏为 `***`，但运行时值有效。
+**CI/CD（GitHub Actions → Railway）**
+- 工作流：`.github/workflows/main.yml:1-37`，触发 `push` 到 `main`
+  - Checkout 代码：`actions/checkout@v4`（`.github/workflows/main.yml:12`）
+  - 安装 Python 与依赖：`actions/setup-python@v5` + `pip install`（`.github/workflows/main.yml:15-24`）
+  - 运行测试：`pytest -q`（`.github/workflows/main.yml:26-27`）
+  - 构建镜像（健康校验）：`docker build -t rag-app:ci .`（`.github/workflows/main.yml:29-30`）
+  - 部署到 Railway：`bervProject/railway-deploy@main`（`.github/workflows/main.yml:32-37`）
+- 仓库 Secrets
+  - `RAILWAY_TOKEN`：项目令牌（Railway 项目 Settings → Tokens）
+  - `RAILWAY_SERVICE_ID`：服务 ID
 
-## 权限与最小权限建议
-- GitHub Actions 角色需要允许对现有服务执行更新（如 `apprunner:UpdateService`）。
-- 需要允许 `iam:PassRole` 传递以下角色到 App Runner：
-  - `bee-edu-apprunner-instance-role`
-  - `bee-edu-apprunner-role`
+**部署与使用**
+- 在 Railway 项目中设置环境变量：`OPENAI_API_KEY` 与所有 `FIREBASE_*`。
+- 推送到 `main` 后，GitHub Actions 将自动构建、测试并部署到 Railway。
+- 部署完成后访问 `https://<railway-domain>/ui` 登录并开始聊天。
 
-## 版本固定（可选）
-- 为稳定性建议固定 Action 版本，例如：
-  - `uses: awslabs/amazon-app-runner-deploy@v2.5.2`
+**文件位置参考**
+- 路由与静态挂载：`app.py:67`、`app.py:71-73`、`app.py:75-83`、`app.py:85-94`、`app.py:96`
+- 工作流：`.github/workflows/main.yml:1-37`
+- 前端：`static/index.html`、`static/app.js`、`static/styles.css`
+- 测试：`tests/test_app.py`
+
+**参考链接**
+- Railway 文章：`https://blog.railway.com/p/github-actions`
+- 部署 Action：`https://github.com/bervProject/railway-deploy`
